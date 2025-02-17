@@ -1,0 +1,9 @@
+# Top-level configuration
+name = "startease-stats-api"
+main = "src/index.ts"
+
+[[d1_databases]]
+binding = "DB" # available in your Worker on env.DB
+database_name = "startease-db"
+database_id = "bc28a77c-2c4c-4f14-a640-0f89a937302f"
+
