@@ -1,0 +1,28 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Stat {
+  id        String   @id @default(uuid())
+  app       String 
+  totalProjectsGenerated Int @default(0)
+  projectGeneratedStats ProjectGeneratedStat[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model ProjectGeneratedStat {
+  id Int @id @default(autoincrement())
+  framework String
+  genCount Int @default(0)
+  statId String
+  stat Stat @relation(fields: [statId], references: [id])
+}

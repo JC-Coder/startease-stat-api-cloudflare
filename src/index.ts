@@ -2,12 +2,18 @@ import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { z } from "zod";
+import { PrismaClient } from "@prisma/client";
+import { PrismaD1 } from "@prisma/adapter-d1";
+import { getPrisma } from "./prismaFunction";
+import { Bindings } from "hono/types";
 
-type Bindings = {
+export interface Env {
   DB: D1Database;
-};
+}
 
-const app = new Hono<{ Bindings: Bindings }>();
+const app = new Hono<{
+  Bindings: Env;
+}>();
 
 // enable cors
 app.use(
@@ -19,15 +25,11 @@ app.use(
 
 app.get("/", async (c) => {
   console.log("Hello Hono!");
+  const prisma = getPrisma(c.env.DB);
 
-  console.log("c env", c.env);
+  const stats = await prisma.stat.findFirst({});
 
-  const envData = c.env.DB;
-  console.log("env", envData);
-
-  const result = await c.env.DB.prepare("SELECT * FROM stats").bind().all();
-
-  return c.json(result);
+  return c.json(stats);
 });
 
 app.post(
@@ -44,61 +46,80 @@ app.post(
       console.log("req body", c.req.valid("json"));
       const { app, framework } = c.req.valid("json");
 
-      let stat = await c.env.DB.prepare("SELECT * FROM stats WHERE app = ?")
-        .bind(app)
-        .first();
+      const prisma = getPrisma(c.env.DB);
 
-      console.log("getStatForApp", stat);
+      const stat = await prisma.stat.findFirst({
+        where: {
+          app: app,
+        },
+        include: {
+          projectGeneratedStats: true,
+        },
+      });
 
-      // if stats not found for framework then we create a new record
       if (!stat) {
-        const createdRecord = await c.env.DB.prepare(
-          "INSERT INTO stats (app, totalProjectGenerated) VALUES (?, ?)"
-        )
-          .bind(app, 1)
-          .run();
-
-        if (!createdRecord.results[0]) {
-          throw new Error("Failed to create stat");
-        }
-
-        stat = createdRecord.results[0];
-
-        // add project generated stats record
-        await c.env.DB.prepare(
-          "INSERT INTO projectGeneratedStats (statId, framework, genCount) VALUES (?, ?, ?)"
-        )
-          .bind(stat.id, framework, 1)
-          .run();
+        await prisma.stat.create({
+          data: {
+            app: "startease",
+            totalProjectsGenerated: 1,
+            projectGeneratedStats: {
+              create: {
+                framework,
+                genCount: 1,
+              },
+            },
+          },
+        });
       } else {
-        const projectGeneratedStat = await c.env.DB.prepare(
-          "SELECT * FROM projectGeneratedStats WHERE statId = ?"
-        )
-          .bind(stat.id)
-          .first();
-
-        const totalGeneratedForFramework = Number(
-          projectGeneratedStat?.genCount || 0
+        const frameworkExist = stat?.projectGeneratedStats?.find(
+          (stat) => stat.framework.toLowerCase() === framework.toLowerCase()
         );
 
-        if (!projectGeneratedStat) {
-          await c.env.DB.prepare(
-            "INSERT INTO projectGeneratedStats (statId, framework, genCount) VALUES (?, ?, ?)"
-          )
-            .bind(stat.id, framework, 1)
-            .run();
+        if (frameworkExist) {
+          await prisma.stat.update({
+            where: {
+              id: stat.id,
+            },
+            data: {
+              totalProjectsGenerated: {
+                increment: 1,
+              },
+              projectGeneratedStats: {
+                update: {
+                  where: {
+                    id: frameworkExist.id,
+                  },
+                  data: {
+                    genCount: {
+                      increment: 1,
+                    },
+                  },
+                },
+              },
+            },
+          });
         } else {
-          await c.env.DB.prepare(
-            "UPDATE projectGeneratedStats SET genCount = ? WHERE statId = ?"
-          )
-            .bind(totalGeneratedForFramework + 1, stat.id)
-            .run();
+          await prisma.stat.update({
+            where: {
+              id: stat.id,
+            },
+            data: {
+              totalProjectsGenerated: {
+                increment: 1,
+              },
+              projectGeneratedStats: {
+                create: {
+                  framework,
+                  genCount: 1,
+                },
+              },
+            },
+          });
         }
       }
 
       return c.json({
         success: true,
-        data: stat,
         message: "Success",
       });
     } catch (error: any) {
@@ -115,63 +136,48 @@ app.post(
   }
 );
 
-app.get("/all-stats", async (c) => {
-  try {
-    const result = await c.env.DB.prepare(
-      `
-      SELECT 
-        s.id as statId,
-        s.app,
-        s.totalProjectGenerated,
-        s.createdAt,
-        s.updatedAt,
-        pgs.framework,
-        pgs.genCount
-      FROM stats s
-      LEFT JOIN projectGeneratedStats pgs ON s.id = pgs.statId
-      ORDER BY s.id ASC
-    `
-    )
-      .bind()
-      .all();
+app.get(
+  "/all-stats",
+  zValidator(
+    "query",
+    z.object({
+      app: z.string().optional(),
+    })
+  ),
+  async (c) => {
+    try {
+      const { app } = c.req.valid("query");
 
-    // Group results by stat
-    const groupedStats = result.results.reduce((acc: any, row: any) => {
-      if (!acc[row.statId]) {
-        acc[row.statId] = {
-          id: row.statId,
-          app: row.app,
-          totalProjectGenerated: row.totalProjectGenerated,
-          createdAt: row.createdAt,
-          updatedAt: row.updatedAt,
-          frameworks: [],
-        };
-      }
-      if (row.framework) {
-        acc[row.statId].frameworks.push({
-          framework: row.framework,
-          genCount: row.genCount,
-        });
-      }
-      return acc;
-    }, {});
+      console.log("app", app);
 
-    return c.json({
-      success: true,
-      data: Object.values(groupedStats),
-      message: "Success",
-    });
-  } catch (error) {
-    console.error("Error fetching all stats", error);
-    return c.json(
-      {
+      const prisma = getPrisma(c.env.DB);
+      const stats = app
+        ? await prisma.stat.findFirst({
+            where: { app: app },
+            include: {
+              projectGeneratedStats: true,
+            },
+          })
+        : await prisma.stat.findMany({
+            include: {
+              projectGeneratedStats: true,
+            },
+          });
+
+      return c.json({
+        success: true,
+        data: stats,
+        message: "Success",
+      });
+    } catch (error) {
+      console.error("error getting stats", error);
+      return c.json({
         success: false,
         data: null,
-        message: "Error fetching all stats",
-      },
-      500
-    );
+        message: "Error getting stats",
+      });
+    }
   }
-});
+);
 
 export default app;
